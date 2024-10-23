@@ -4,16 +4,15 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset, random_split
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torchvision import transforms
-from PIL import Image
+from PIL import Image, ImageFilter
 import os
 import numpy as np
-import matplotlib.pyplot as plt
-from pathlib import Path
 from tqdm import tqdm
-
+from pathlib import Path
+import copy
 # Set random seed for reproducibility
 torch.manual_seed(42)
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
 
 # Data transforms with more augmentations
 import torch
@@ -238,19 +237,7 @@ class Decoder(nn.Module):
     
     def forward(self, x):
         return self.decoder(x)
-
-class MaskedAutoencoder(nn.Module):
-    def __init__(self, mask_ratio=0.5):
-        super().__init__()
-        self.masking = MaskingLayer(mask_ratio)
-        self.encoder = SwinEncoder()
-        self.decoder = Decoder()
     
-    def forward(self, x):
-        masked = self.masking(x)
-        latent = self.encoder(masked)
-        return self.decoder(latent)
-
 class ClassificationHead(nn.Module):
     def __init__(self, num_classes):
         super().__init__()
@@ -269,20 +256,53 @@ class ClassificationHead(nn.Module):
         x = self.fc(x)
         return x
 
-class MAEClassifier(nn.Module):
-    def __init__(self, num_classes, pretrained_encoder):
+class PreTrainingModel(nn.Module):
+    def __init__(self, mask_ratio=0.75):
+        super().__init__()
+        self.encoder = SwinEncoder()
+        self.masking = MaskingLayer(mask_ratio)
+        self.decoder = Decoder()
+    
+    def forward(self, x):
+        masked = self.masking(x)
+        features = self.encoder(masked)
+        reconstruction = self.decoder(features)
+        return reconstruction, masked
+
+class FineTuningModel(nn.Module):
+    def __init__(self, pretrained_encoder, num_classes):
         super().__init__()
         self.encoder = pretrained_encoder
         self.classifier = ClassificationHead(num_classes)
+        
+        # Freeze encoder initially
+        for param in self.encoder.parameters():
+            param.requires_grad = False
+    
+    def unfreeze_encoder(self, num_layers=None):
+        """Unfreeze encoder layers gradually during training"""
+        if num_layers is None:
+            # Unfreeze all layers
+            for param in self.encoder.parameters():
+                param.requires_grad = True
+        else:
+            # Unfreeze specific stages from the end
+            stages = [self.encoder.stage5, self.encoder.stage4, 
+                     self.encoder.stage3, self.encoder.stage2, 
+                     self.encoder.stage1]
+            for stage in stages[:num_layers]:
+                for param in stage.parameters():
+                    param.requires_grad = True
     
     def forward(self, x):
         features = self.encoder(x)
         return self.classifier(features)
 
-def train_mae(model, train_loader, val_loader, num_epochs=10):
+def pretrain_mae(model, train_loader, val_loader, num_epochs=50):
+    """Pretrain the encoder using MAE"""
     model = model.to(device)
     criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.05)
     scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.1, verbose=True)
     
     best_val_loss = float('inf')
@@ -293,15 +313,18 @@ def train_mae(model, train_loader, val_loader, num_epochs=10):
         # Training
         model.train()
         train_loss = 0
-        pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs} [Train]')
         
+        pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs} [MAE Pretrain]')
         for data, _ in pbar:
             data = data.to(device)
+            
             optimizer.zero_grad()
-            output = model(data)
-            loss = criterion(output, data)
+            reconstruction, masked = model(data)
+            loss = criterion(reconstruction, data)
+            
             loss.backward()
             optimizer.step()
+            
             train_loss += loss.item()
             pbar.set_postfix({'loss': loss.item()})
         
@@ -313,8 +336,9 @@ def train_mae(model, train_loader, val_loader, num_epochs=10):
         with torch.no_grad():
             for data, _ in tqdm(val_loader, desc='[Validation]'):
                 data = data.to(device)
-                output = model(data)
-                val_loss += criterion(output, data).item()
+                reconstruction, masked = model(data)
+                loss = criterion(reconstruction, data)
+                val_loss += loss.item()
         
         val_loss /= len(val_loader)
         scheduler.step(val_loss)
@@ -323,45 +347,55 @@ def train_mae(model, train_loader, val_loader, num_epochs=10):
         print(f'Training Loss: {train_loss:.6f}')
         print(f'Validation Loss: {val_loss:.6f}')
         
-        # Early stopping check
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             patience_counter = 0
-            best_model_state = model.state_dict()
+            best_model_state = copy.deepcopy(model.encoder.state_dict())
         else:
             patience_counter += 1
-            if patience_counter >= 10:
+            if patience_counter >= 15:
                 print("Early stopping triggered!")
                 break
     
-    # Load best model
-    model.load_state_dict(best_model_state)
-    return model
+    return best_model_state
 
-def train_classifier(model, train_loader, val_loader, num_epochs=10):
+def finetune_classifier(model, train_loader, val_loader, num_epochs=50):
+    """Finetune the model for classification"""
     model = model.to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
-    scheduler = ReduceLROnPlateau(optimizer, mode='max', patience=5, factor=0.1, verbose=True)
+    
+    # Start with only classifier parameters
+    optimizer = optim.AdamW(model.classifier.parameters(), lr=1e-4, weight_decay=0.01)
+    scheduler = ReduceLROnPlateau(optimizer, mode='max', patience=3, factor=0.1, verbose=True)
     
     best_val_acc = 0
     patience_counter = 0
     best_model_state = None
     
     for epoch in range(num_epochs):
+        # Gradually unfreeze encoder layers
+        if epoch == 10:
+            model.unfreeze_encoder(num_layers=2)  # Unfreeze last 2 stages
+            optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()),
+                                  lr=5e-5, weight_decay=0.01)
+        elif epoch == 20:
+            model.unfreeze_encoder()  # Unfreeze all layers
+            optimizer = optim.AdamW(model.parameters(), lr=1e-5, weight_decay=0.01)
+        
         # Training
         model.train()
-        train_loss = 0
         correct = 0
         total = 0
-        pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs} [Train]')
+        train_loss = 0
         
+        pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs} [Finetune]')
         for data, targets in pbar:
             data, targets = data.to(device), targets.to(device)
             
             optimizer.zero_grad()
             outputs = model(data)
             loss = criterion(outputs, targets)
+            
             loss.backward()
             optimizer.step()
             
@@ -380,9 +414,9 @@ def train_classifier(model, train_loader, val_loader, num_epochs=10):
         
         # Validation
         model.eval()
-        val_loss = 0
         correct = 0
         total = 0
+        val_loss = 0
         
         with torch.no_grad():
             for data, targets in tqdm(val_loader, desc='[Validation]'):
@@ -397,136 +431,83 @@ def train_classifier(model, train_loader, val_loader, num_epochs=10):
         
         val_loss /= len(val_loader)
         val_acc = 100.*correct/total
+        
         scheduler.step(val_acc)
         
         print(f'Epoch: {epoch+1}')
-        print(f'Training Loss: {train_loss:.6f}, Training Acc: {train_acc:.2f}%')
-        print(f'Validation Loss: {val_loss:.6f}, Validation Acc: {val_acc:.2f}%')
+        print(f'Training - Loss: {train_loss:.6f}, Acc: {train_acc:.2f}%')
+        print(f'Validation - Loss: {val_loss:.6f}, Acc: {val_acc:.2f}%')
         
-        # Early stopping check
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             patience_counter = 0
-            best_model_state = model.state_dict()
+            best_model_state = copy.deepcopy(model.state_dict())
         else:
             patience_counter += 1
             if patience_counter >= 10:
                 print("Early stopping triggered!")
                 break
     
-    # Load best model
     model.load_state_dict(best_model_state)
     return model
 
 if __name__ == "__main__":
-    # Data transforms
-    transform = transforms.Compose([
-        transforms.Resize((64, 64)),
-        transforms.ToTensor(),
-    ])
+    # Create datasets
+    pretrain_dir = "data/train"  # Directory with unlabeled images
+    train_dir = "data/train"  # Directory with labeled images
     
-    # Create pretraining dataset
-    pretrain_dir = "data/train"
-    # Create pretraining datasets with different transforms for train and val
+    # Create pretraining datasets
     pretrain_dataset = CustomImageDataset(pretrain_dir, is_pretraining=True, is_training=True)
-    val_dataset_pretrain = CustomImageDataset(pretrain_dir, is_pretraining=True, is_training=False)
-
+    pretrain_val_dataset = CustomImageDataset(pretrain_dir, is_pretraining=True, is_training=False)
+    
     # Split pretraining dataset
-    pretrain_size = int(0.8 * len(pretrain_dataset))
-    val_size = len(pretrain_dataset) - pretrain_size
-    pretrain_dataset, val_dataset = random_split(pretrain_dataset, [pretrain_size, val_size])
+    pretrain_train_size = int(0.9 * len(pretrain_dataset))
+    pretrain_val_size = len(pretrain_dataset) - pretrain_train_size
+    pretrain_train_dataset, pretrain_val_dataset = random_split(
+        pretrain_dataset, [pretrain_train_size, pretrain_val_size]
+    )
     
     # Create pretraining data loaders
-    pretrain_loader = DataLoader(pretrain_dataset, batch_size=8, shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False, num_workers=4)
+    pretrain_train_loader = DataLoader(
+        pretrain_train_dataset, batch_size=8, shuffle=True, num_workers=4
+    )
+    pretrain_val_loader = DataLoader(
+        pretrain_val_dataset, batch_size=8, shuffle=False, num_workers=4
+    )
     
-    # Initialize and train MAE
-    print("Starting MAE pretraining...")
-    mae_model = MaskedAutoencoder()
-    mae_model = train_mae(mae_model, pretrain_loader, val_loader, num_epochs=50)
-    
-    # Save pretrained MAE
-    torch.save(mae_model.state_dict(), 'pretrained_mae.pth')
-    
-    # Create classification dataset
-    train_dir = "data/train"
+    # Create finetuning datasets
     train_dataset = CustomImageDataset(train_dir, is_pretraining=False, is_training=True)
     val_dataset = CustomImageDataset(train_dir, is_pretraining=False, is_training=False)
     
-    # Split training dataset
+    # Split finetuning dataset
     train_size = int(0.8 * len(train_dataset))
     val_size = len(train_dataset) - train_size
     train_dataset, val_dataset = random_split(train_dataset, [train_size, val_size])
     
-    # Create classification data loaders
+    # Create finetuning data loaders
     train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True, num_workers=4)
     val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False, num_workers=4)
     
-    # Initialize classifier with pretrained encoder
-    num_classes = len(train_dataset.dataset.classes)  # Access classes through dataset attribute
-    classifier = MAEClassifier(num_classes, mae_model.encoder)
+    # Phase 1: Pretraining
+    print("Starting MAE pretraining...")
+    pretrain_model = PreTrainingModel()
+    best_encoder_state = pretrain_mae(
+        pretrain_model, pretrain_train_loader, pretrain_val_loader
+    )
     
-    # Train classifier
-    print("\nStarting classifier training...")
-    classifier = train_classifier(classifier, train_loader, val_loader, num_epochs=50)
+    # Save pretrained encoder
+    torch.save(best_encoder_state, 'pretrained_encoder.pth')
     
-    # Save final classifier
-    torch.save(classifier.state_dict(), 'final_classifier.pth')
+    # Phase 2: Finetuning
+    print("Starting classification finetuning...")
+    encoder = SwinEncoder()
+    encoder.load_state_dict(best_encoder_state)
+    num_classes = len(train_dataset.dataset.classes)
+    finetune_model = FineTuningModel(encoder, num_classes)
     
-    # Optional: Create test dataset and evaluate
-    test_dir = "data/test"
-    if os.path.exists(test_dir):
-        print("\nEvaluating on test set...")
-        test_dataset = CustomImageDataset(test_dir, transform=transform, is_pretraining=False)
-        test_loader = DataLoader(test_dataset, batch_size=8, shuffle=False, num_workers=4)
-        
-        classifier.eval()
-        correct = 0
-        total = 0
-        all_preds = []
-        all_targets = []
-        
-        with torch.no_grad():
-            for data, targets in tqdm(test_loader, desc='Testing'):
-                data, targets = data.to(device), targets.to(device)
-                outputs = classifier(data)
-                _, predicted = outputs.max(1)
-                
-                total += targets.size(0)
-                correct += predicted.eq(targets).sum().item()
-                
-                all_preds.extend(predicted.cpu().numpy())
-                all_targets.extend(targets.cpu().numpy())
-        
-        accuracy = 100. * correct / total
-        print(f'\nTest Accuracy: {accuracy:.2f}%')
-        
-        # Plot confusion matrix
-        from sklearn.metrics import confusion_matrix
-        import seaborn as sns
-        
-        cm = confusion_matrix(all_targets, all_preds)
-        plt.figure(figsize=(10, 8))
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-                   xticklabels=test_dataset.classes,
-                   yticklabels=test_dataset.classes)
-        plt.title('Confusion Matrix')
-        plt.xlabel('Predicted')
-        plt.ylabel('True')
-        plt.tight_layout()
-        plt.savefig('confusion_matrix.png')
-        plt.close()
-
-        # Save detailed metrics
-        from sklearn.metrics import classification_report
-        report = classification_report(all_targets, all_preds, 
-                                    target_names=test_dataset.classes,
-                                    output_dict=True)
-        
-        # Convert to DataFrame and save
-        import pandas as pd
-        df_metrics = pd.DataFrame(report).transpose()
-        df_metrics.to_csv('classification_metrics.csv')
-        
-        print("\nDetailed metrics saved to 'classification_metrics.csv'")
-        print("Confusion matrix plot saved as 'confusion_matrix.png'")
+    finetune_model = finetune_classifier(
+        finetune_model, train_loader, val_loader
+    )
+    
+    # Save final model
+    torch.save(finetune_model.state_dict(), 'final_finetuned_model.pth')

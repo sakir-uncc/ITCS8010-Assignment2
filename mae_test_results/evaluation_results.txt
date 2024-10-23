@@ -1,0 +1,31 @@
+Classification Results
+=====================
+
+Overall Accuracy: 6.25%
+
+Per-class Metrics:
+-----------------
+           LivingRoom  InsideCity  Kitchen  Flower  Mountain  TallBuilding  Bedroom  Industrial  Highway  Store  Coast  Office     Forest  Street  Suburb  OpenCountry  accuracy   macro avg  weighted avg
+precision         0.0         0.0      0.0     0.0       0.0           0.0      0.0         0.0      0.0    0.0    0.0     0.0   0.062500     0.0     0.0          0.0    0.0625    0.003906      0.003906
+recall            0.0         0.0      0.0     0.0       0.0           0.0      0.0         0.0      0.0    0.0    0.0     0.0   1.000000     0.0     0.0          0.0    0.0625    0.062500      0.062500
+f1-score          0.0         0.0      0.0     0.0       0.0           0.0      0.0         0.0      0.0    0.0    0.0     0.0   0.117647     0.0     0.0          0.0    0.0625    0.007353      0.007353
+support          25.0        25.0     25.0    25.0      25.0          25.0     25.0        25.0     25.0   25.0   25.0    25.0  25.000000    25.0    25.0         25.0    0.0625  400.000000    400.000000
+
+ROC AUC Scores:
+--------------
+LivingRoom: 0.5000
+InsideCity: 0.5000
+Kitchen: 0.5000
+Flower: 0.5000
+Mountain: 0.5000
+TallBuilding: 0.5000
+Bedroom: 0.5000
+Industrial: 0.5000
+Highway: 0.5000
+Store: 0.5000
+Coast: 0.5000
+Office: 0.5000
+Forest: 0.5000
+Street: 0.5000
+Suburb: 0.5000
+OpenCountry: 0.5000

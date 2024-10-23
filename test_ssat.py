@@ -47,7 +47,7 @@ def calculate_reconstruction_metrics(original, reconstruction):
         sigma12 = ((img1 - mu1) * (img2 - mu2)).mean()
         
         ssim = ((2 * mu1 * mu2 + C1) * (2 * sigma12 + C2)) / \
-               ((mu1 ** 2 + mu2 ** 2 + C1) * (sigma1 ** 2 + sigma2 ** 2 + C2))
+            ((mu1 ** 2 + mu2 ** 2 + C1) * (sigma1 ** 2 + sigma2 ** 2 + C2))
         return ssim
     
     ssim_value = ssim(orig, recon)
@@ -83,6 +83,29 @@ def plot_learning_curves(train_losses, val_losses, save_dir):
     plt.tight_layout()
     plt.savefig(f'{save_dir}/learning_curves.png')
     plt.close()
+
+def plot_confusion_matrix(y_true, y_pred, classes, save_dir):
+    """Plot confusion matrix"""
+    plt.figure(figsize=(10, 8))
+    
+    # Calculate confusion matrix
+    cm = confusion_matrix(y_true, y_pred)
+    
+    # Normalize confusion matrix
+    cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+    
+    # Create heatmap
+    sns.heatmap(cm_normalized, annot=True, fmt='.2f', cmap='Blues',
+                xticklabels=classes, yticklabels=classes)
+    
+    plt.title('Normalized Confusion Matrix')
+    plt.xlabel('Predicted Label')
+    plt.ylabel('True Label')
+    plt.tight_layout()
+    plt.savefig(f'{save_dir}/confusion_matrix.png')
+    plt.close()
+    
+    return cm
 
 def plot_roc_curves(y_true, y_score, classes, save_dir):
     """Plot ROC curves for each class"""
@@ -173,7 +196,7 @@ def plot_latent_space(features, labels, classes, save_dir):
     plt.xlabel('t-SNE 1')
     plt.ylabel('t-SNE 2')
     plt.legend(handles=scatter.legend_elements()[0], labels=classes, 
-              title="Classes", bbox_to_anchor=(1.05, 1), loc='upper left')
+            title="Classes", bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.tight_layout()
     plt.savefig(f'{save_dir}/latent_space_tsne.png')
     plt.close()
@@ -275,6 +298,7 @@ def evaluate_combined_model(model, test_loader, device, save_dir='results'):
     classes = get_classes(test_loader.dataset)
     
     # Generate and save plots
+    confusion_mat = plot_confusion_matrix(all_targets, all_preds, classes, save_dir)
     plot_roc_curves(all_targets, all_scores, classes, save_dir)
     plot_precision_recall_curves(all_targets, all_scores, classes, save_dir)
     plot_reconstruction_distribution(reconstruction_metrics, save_dir)
@@ -286,7 +310,8 @@ def evaluate_combined_model(model, test_loader, device, save_dir='results'):
             'Accuracy': (all_preds == all_targets).mean() * 100,
             'Per-class Report': classification_report(all_targets, all_preds, 
                                                     target_names=classes, 
-                                                    output_dict=True)
+                                                    output_dict=True),
+            'Confusion Matrix': confusion_mat
         },
         'Reconstruction': {
             'MSE': {
@@ -310,6 +335,10 @@ def evaluate_combined_model(model, test_loader, device, save_dir='results'):
         f.write(f"Overall Accuracy: {results['Classification']['Accuracy']:.2f}%\n\n")
         f.write('Per-class Results:\n')
         f.write(pd.DataFrame(results['Classification']['Per-class Report']).to_string())
+        f.write('\n\nConfusion Matrix:\n')
+        f.write(pd.DataFrame(results['Classification']['Confusion Matrix'],
+                           index=classes,
+                           columns=classes).to_string())
         f.write('\n\nReconstruction Results:\n')
         for metric in ['MSE', 'PSNR', 'SSIM']:
             f.write(f"{metric}:\n")
@@ -335,5 +364,21 @@ if __name__ == "__main__":
     model.load_state_dict(torch.load('final_combined_model.pth'))
     model = model.to(device)
     
+    # Create results directory
+    results_dir = Path('evaluation_results')
+    results_dir.mkdir(parents=True, exist_ok=True)
+    
     # Evaluate the model
-    results = evaluate_combined_model(model, test_loader, device)
+    print("Starting model evaluation...")
+    results = evaluate_combined_model(model, test_loader, device, save_dir=results_dir)
+    
+    # Print summary of results
+    print("\nEvaluation Complete!")
+    print(f"Overall Accuracy: {results['Classification']['Accuracy']:.2f}%")
+    print("\nReconstruction Metrics:")
+    for metric in ['MSE', 'PSNR', 'SSIM']:
+        print(f"{metric}:")
+        print(f"  Mean: {results['Reconstruction'][metric]['Mean']:.4f}")
+        print(f"  Std:  {results['Reconstruction'][metric]['Std']:.4f}")
+    
+    print("\nDetailed results have been saved to:", results_dir)
