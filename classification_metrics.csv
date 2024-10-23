@@ -1,0 +1,20 @@
+,precision,recall,f1-score,support
+data/test/LivingRoom,0.0,0.0,0.0,25.0
+data/test/InsideCity,0.0,0.0,0.0,25.0
+data/test/Kitchen,0.0,0.0,0.0,25.0
+data/test/Flower,0.0,0.0,0.0,25.0
+data/test/Mountain,0.0,0.0,0.0,25.0
+data/test/TallBuilding,0.0,0.0,0.0,25.0
+data/test/Bedroom,0.0,0.0,0.0,25.0
+data/test/Industrial,0.0,0.0,0.0,25.0
+data/test/Highway,0.0,0.0,0.0,25.0
+data/test/Store,0.0,0.0,0.0,25.0
+data/test/Coast,0.0,0.0,0.0,25.0
+data/test/Office,0.0,0.0,0.0,25.0
+data/test/Forest,0.0,0.0,0.0,25.0
+data/test/Street,0.0625,1.0,0.11764705882352941,25.0
+data/test/Suburb,0.0,0.0,0.0,25.0
+data/test/OpenCountry,0.0,0.0,0.0,25.0
+accuracy,0.0625,0.0625,0.0625,0.0625
+macro avg,0.00390625,0.0625,0.007352941176470588,400.0
+weighted avg,0.00390625,0.0625,0.007352941176470587,400.0
